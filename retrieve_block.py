@@ -12,14 +12,35 @@ while True:
         parts = socket.recv_multipart()
 
         if parts:
-            
             data = {
-                    "jsonrpc":"2.0","id":"0","method":"getblocktemplate","params":{"wallet_address":POOL_ADDRESS}
-                    }
-            tpl = requests.post("http://10.66.66.2:18085/json_rpc", json=data).json()["result"]
-            blob = tpl["blocktemplate_blob"]
+                        "jsonrpc": "2.0",
+                        "id":      "0",
+                        "method":  "get_block_template",
+                        "params": {
+                        "wallet_address": POOL_ADDRESS,
+                        "reserve_size":   8
+                                }
+                        }       
+            rpc_url = "http://10.66.66.2:18085/json_rpc"
+            tpl = requests.post(rpc_url, json=data).json()["result"]
+
+            # 5. Inject extranonce into the mutable blob
+            blob_hex        = tpl["blocktemplate_blob"]
             reserved_offset = tpl["reserved_offset"]
-            print(blob, reserved_offset)
+            blob            = bytearray.fromhex(blob_hex)
+
+            pool_id    = 1
+            extranonce = pool_id.to_bytes(8, 'little')
+            blob[reserved_offset:reserved_offset+8] = extranonce    # overwrite reserved bytes
+
+            # 6. Publish job to miners
+            job = {
+                    "blob":       blob.hex(),
+                    "difficulty": tpl["difficulty"],
+                    "height":     tpl["height"],
+                }       
+            print("New job:", job)
+
 
         if len(parts) == 1:
             message = parts[0].decode('utf-8')

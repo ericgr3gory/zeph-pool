@@ -2,55 +2,69 @@ import zmq
 import json
 import requests
 
-# Define your pool address
+# Constants
+ZMQ_ENDPOINT = "tcp://192.168.0.200:18083"
+RPC_URL      = "http://10.66.66.2:18085/json_rpc"
 POOL_ADDRESS = "ZEPHYR37Nih5NeNGLgKFMMfRVEPsaRDh1b9nkqcjjPen3G8RZVPaVtvc3gGELTC9geVsuquZogrSHCaP3sHvq8N6cyCSRJvkbUV57"
+POOL_ID      = 1
+RESERVE_SIZE = 8
 
-# 1. Initialize ZMQ SUB socket
-context = zmq.Context()
-socket  = context.socket(zmq.SUB)
-socket.connect("tcp://192.168.0.200:18083")       # ZMQ publisher endpoint
-socket.setsockopt(zmq.SUBSCRIBE, b"json-full-miner_data")  # subscribe to topic
+ctx  = zmq.Context()
+sock = ctx.socket(zmq.SUB)
+sock.connect(ZMQ_ENDPOINT)
+# subscribe filter must be bytes
+sock.setsockopt(zmq.SUBSCRIBE, b"json-full-miner_data")
 
 while True:
-    # 2. Receive multipart message: topic and payload
-    topic_frame, payload_frame = socket.recv_multipart()      # :contentReference[oaicite:7]{index=7}
-    topic   = topic_frame.decode()                            # decode topic
-    message = json.loads(payload_frame.decode())              # parse JSON
+    # recv_multipart() may return [payload] or [topic, payload]
+    parts = sock.recv_multipart()
+    print(parts)
+    if len(parts) == 2:
+        topic_frame, payload_frame = parts
+    else:
+        # single-frame case: it's already the payload
+        topic_frame    = None
+        payload_frame  = parts[0]
 
-    # 3. Extract header info
+    # decode and parse
+    try:
+        message = json.loads(payload_frame.decode('utf-8'))
+    except json.JSONDecodeError:
+        # skip non-JSON frames
+        continue
+
+    # Optional: check topic if you care
+    if topic_frame:
+        topic = topic_frame.decode('utf-8')
+        if topic != "json-full-miner_data":
+            continue
+
+    # Now you have the JSON in `message`
     height     = message["height"]
     prev_id    = message["prev_id"]
     difficulty = int(message["difficulty"], 16)
+    print(f"ZMQ update — height {height}, difficulty {difficulty}")
 
-    # 4. Fetch full template via RPC
+    # Fetch the full template via RPC
     rpc_payload = {
-        "jsonrpc": "2.0",
-        "id":      "0",
-        "method":  "get_block_template",
-        "params": {
+        "jsonrpc":"2.0", "id":"0",
+        "method":"get_block_template",
+        "params":{
             "wallet_address": POOL_ADDRESS,
-            "reserve_size":   8
+            "reserve_size":   RESERVE_SIZE
         }
     }
-    rpc_url = "http://10.66.66.2:18085/json_rpc"
-    tpl = requests.post(rpc_url, json=rpc_payload).json()["result"]
+    tpl = requests.post(RPC_URL, json=rpc_payload).json()["result"]
 
-    # 5. Inject extranonce into the mutable blob
-    blob_hex        = tpl["blocktemplate_blob"]
-    reserved_offset = tpl["reserved_offset"]
-    blob            = bytearray.fromhex(blob_hex)
+    # Build job blob
+    blob = bytearray.fromhex(tpl["blocktemplate_blob"])
+    extranonce = POOL_ID.to_bytes(RESERVE_SIZE, 'little')
+    offset     = tpl["reserved_offset"]
+    blob[offset:offset+RESERVE_SIZE] = extranonce
 
-    pool_id    = 1
-    extranonce = pool_id.to_bytes(8, 'little')
-    blob[reserved_offset:reserved_offset+8] = extranonce    # overwrite reserved bytes
-
-    # 6. Publish job to miners
     job = {
         "blob":       blob.hex(),
         "difficulty": tpl["difficulty"],
-        "height":     tpl["height"],
+        "height":     tpl["height"]
     }
     print("New job:", job)
-
-    # Throttle if needed
-    # time.sleep(0.1)
